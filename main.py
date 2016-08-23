@@ -4,22 +4,25 @@ import http.client
 import socket
 import logging
 import urllib.parse
+import dateutil.parser
+import pytz
 from time import sleep
 from datetime import datetime
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from pprint import pprint
+from pymongo import MongoClient
 
 logger_level = logging.DEBUG
 logger_formatter = "[%(asctime)s] %(levelname)s :: %(message)s"
 logging.basicConfig(level=logger_level, format=logger_formatter)
 
 headers = {
-	#"Accept-Encoding": "gzip, deflate, sdch",
-	#"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-	#"Accept-Language": "en",
-	#"Connection": "keep-alive",
-	#"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.97 Safari/537.36",
+	# "Accept-Encoding": "gzip, deflate, sdch",
+	# "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+	# "Accept-Language": "en",
+	# "Connection": "keep-alive",
+	# "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/48.0.2564.97 Safari/537.36",
 }
 
 hostname = "tieba.baidu.com"
@@ -64,11 +67,10 @@ def get(conn, url):
 	finally:
 		conn.close()
 
-now_date = datetime.now()
-
+timezone = pytz.timezone("Asia/Shanghai")
 #You should not want to run this around 12:00 p.m.
 def format_time(time, oldtime=None):
-	return time
+	return timezone.localize(dateutil.parser.parse(time))
 
 ## thread_item perprorities
 ## {"id":4303087230,"author_name":"L\u5bfb\u5b88\u62a4\u661f","first_post_id":82410201113,"reply_num":275,"is_bakan":null,"vid":"","is_good":null,"is_top":null,"is_protal":null,"is_membertop":null}
@@ -151,6 +153,7 @@ def parse_list(html):
 	return l
 
 def main():
+	db = MongoClient('localhost', 3269).test
 	conn = http.client.HTTPConnection(hostname, timeout=10)
 	#html = open("example.html").read()
 	while True:
@@ -158,6 +161,28 @@ def main():
 			logging.debug("new iteration")
 			html = get(conn, '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}))
 			l = parse_list(html)
+			for x in l:
+				db.documents.update(
+					{ 'name': x.id },
+					{
+						'$set': {
+							'title': x.title,
+							'author': x.author,
+							'desc': x.desc,
+							# 'catalog': x.catalog,
+						},
+						'$setOnInsert': {
+							'name': x.id,
+							'createtime': x.create_time,
+						}
+					},
+					upsert=True
+				)
+				db.head.insert_one({
+					'name': x.id,
+					'updatetime': x.last_reply_time,
+					'reply': x.reply_num,
+				})
 			print([(x.id, x.reply_num) for x in l])
 		except http.client.HTTPException as e:
 			logging.warn("%s: %s", (type(e),e))
