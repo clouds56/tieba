@@ -14,6 +14,8 @@ documents = list(cursor)
 cursor = db.test.documents.find()
 source = list(cursor)
 
+s = {x['name']:x for x in source}
+
 from collections import defaultdict
 def groupby(t, key, value=None):
     r = defaultdict(set)
@@ -34,3 +36,8 @@ len(g)
 
 # There are some extremely old post that appears on homepage.
 lost = [x['name'] for x in source if x['name'] not in g.keys()]
+
+from collections import OrderedDict
+i = OrderedDict(sorted(g.items(), key=lambda x: -len(x[1])))
+
+[s[x] for x in list(i.keys())[:20]]
