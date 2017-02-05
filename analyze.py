@@ -3,7 +3,6 @@ from datetime import datetime, timezone, timedelta
 
 now = datetime.utcnow().replace(tzinfo=timezone.utc)
 
-now
 db = MongoClient("localhost", 3269)
 cursor = db.test.head.find({ 'updatetime': {
         '$gte': now - timedelta(hours=24),
