@@ -5,7 +5,7 @@ now = datetime.utcnow().replace(tzinfo=timezone.utc)
 
 db = MongoClient("localhost", 3269)
 cursor = db.test.head.find({ 'updatetime': {
-        '$gte': now - timedelta(hours=24),
+        '$gte': now - timedelta(hours=240),
         '$lt': now,
     }, })
 documents = list(cursor)

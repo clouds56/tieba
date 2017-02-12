@@ -7,10 +7,7 @@ import urllib.parse
 import dateutil.parser
 import pytz
 from time import sleep
-from datetime import datetime
-from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from pprint import pprint
 from pymongo import MongoClient
 
 logger_level = logging.DEBUG
@@ -148,12 +145,12 @@ def parse_list(html):
             logging.log(5, "%s", x)
             l.append(x)
         except Exception as e:
-            if s.find(text="贴吧游戏"):
-                logging.log(5, "tieba game thread found")
-            elif s.find(title="置顶"):
+            if s.find(class_="icon-top"):
                 logging.log(5, "tieba top_list_folder found")
-            elif s.find(title="推广"):
+            elif s.find(class_="j_click_stats"):
                 logging.log(5, "tieba j_click_stats found")
+            # if s.find(text="贴吧游戏"):
+            #     logging.log(5, "tieba game thread found")
             else:
                 logging.warning("exception: %s", e)
                 logging.warning("broken thread: %s", s)
