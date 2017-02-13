@@ -1,13 +1,10 @@
 #!/usr/bin/python3
 
-import http.client
-import socket
+import scrapy
 import logging
 import urllib.parse
 import dateutil.parser
 import pytz
-from time import sleep
-from bs4 import BeautifulSoup
 from pymongo import MongoClient
 
 logger_level = logging.DEBUG
@@ -24,48 +21,6 @@ headers = {
 
 hostname = "tieba.baidu.com"
 sleeptime = 60
-
-
-def urlsplit(url):
-    s = url.split("://", 1)
-    if len(s) == 1 and url[:2] == "//":
-        s = url.split("//", 1)
-    h = s[1].split("/", 1)
-    if len(h) == 1:
-        return h[0], ''
-    else:
-        return h[0], '/%s' % h[1]
-
-
-def get(conn, url):
-    try:
-        logging.info("get: %s", url)
-        conn.request("GET", url, headers=headers)
-        res = conn.getresponse()
-        logging.debug("response: %d %s", res.status, res.reason)
-        if res.status == 200:
-            return res.read().decode()
-        elif res.status >= 400:
-            logging.warning("%s not found", url)
-        elif 300 <= res.status < 400:
-            loc = res.getheader('location')
-            logging.debug("redirect to: %s", loc)
-            h, loc = urlsplit(loc)
-            logging.debug("split loc to: %s, %s", h, loc)
-            if h != hostname:
-                logging.warning("hostname change: %s", h)
-                return
-            if loc == url:
-                logging.warning("url loop: %s", loc)
-                return
-            return get(conn, loc)
-        elif 200 < res.status < 300:
-            logging.warning("%s 2xx status", url)
-        else:
-            logging.warning("%s unknown status", url)
-    finally:
-        conn.close()
-
 
 timezone = pytz.timezone("Asia/Shanghai")
 
@@ -112,99 +67,70 @@ class ThreadItem:
         return pformat(vars(self), indent=4, width=1)
 
 
-def find_class_text(soup, classname, tag="span"):
-    s = soup.find(tag, **{"class": classname})
-    if s:
-        return s.text.strip()
-    else:
-        return ''
+def find_class_text(selector, classname, tag=''):
+    return selector.css('%s.%s' % (tag, classname)).xpath('.//text()').extract_first()
 
 
-def parse_list(html):
-    soup = BeautifulSoup(html, "html.parser")
-    logging.debug("parse_list: %s", html[:50].encode())
-    catalog = soup.title.text.strip()
-    if catalog[-6:] == "吧_百度贴吧":
-        catalog = catalog[:-6]
-    logging.debug("title: %s -> %s", soup.title.text.strip(), catalog)
-    thread_list = soup.find(id="thread_list").findAll("li", recursive=False)
-    l = []
-    for s in thread_list:
-        try:
-            attrs = s.find("a", **{"class": "j_th_tit"}).attrs
-            x = ThreadItem(attrs['href'], attrs['title'], catalog=catalog)
-            x.author = find_class_text(s, "tb_icon_author")
-            x.create_time = format_time(find_class_text(s, "is_show_create_time"))
-            x.last_reply_time = format_time(find_class_text(s, "threadlist_reply_date"))
-            x.reply_num = int(find_class_text(s, "threadlist_rep_num"))
-            x.desc = find_class_text(s, "threadlist_abs", tag="div")
-            # logging.log(4, "thread_title: %s", title)
-            # logging.log(4, "author: %s", s.find("span", **{"class": "tb_icon_author"}).text.strip())
-            # logging.log(4, "create_time: %s", s.find("span", **{"class": "is_show_create_time"}).text.strip())
-            # logging.log(4, "last_reply_time: %s", s.find("span", **{"class": "threadlist_reply_date"}).text.strip())
-            logging.log(5, "%s", x)
-            l.append(x)
-        except Exception as e:
-            if s.find(class_="icon-top"):
-                logging.log(5, "tieba top_list_folder found")
-            elif s.find(class_="j_click_stats"):
-                logging.log(5, "tieba j_click_stats found")
-            # if s.find(text="贴吧游戏"):
-            #     logging.log(5, "tieba game thread found")
-            else:
-                logging.warning("exception: %s", e)
-                logging.warning("broken thread: %s", s)
-            continue
-    return l
+def get_attr_value(selector, attr):
+    return selector.xpath('@%s' % attr).extract_first()
 
 
-def main():
+class TiebaSpider(scrapy.Spider):
+    name = "tieba"
+
     db = MongoClient('localhost', 3269).test
-    conn = http.client.HTTPConnection(hostname, timeout=10)
-    # html = open("example.html").read()
-    while True:
-        try:
-            logging.debug("new iteration")
-            html = get(conn, '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}))
-            l = parse_list(html)
-            for x in l:
-                db.documents.update(
-                    {'name': x.id},
-                    {
-                        '$set': {
-                            'title': x.title,
-                            'author': x.author,
-                            'desc': x.desc,
-                            # 'catalog': x.catalog,
-                        },
-                        '$setOnInsert': {
-                            'name': x.id,
-                            'createtime': x.create_time,
-                        }
+
+    def start_requests(self):
+        yield scrapy.Request("http://" + hostname + '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}))
+
+    def parse(self, response):
+        thread_list = response.xpath('//*[@id="thread_list"]/li')
+        l = []
+        for s in thread_list:
+            try:
+                attrs = s.css('a.j_th_tit')
+                x = ThreadItem(get_attr_value(attrs, 'href'), get_attr_value(attrs, 'title'))
+                x.author = find_class_text(s, "tb_icon_author", tag="span")
+                x.create_time = format_time(find_class_text(s, "is_show_create_time"))
+                x.last_reply_time = format_time(find_class_text(s, "threadlist_reply_date"))
+                x.reply_num = int(find_class_text(s, "threadlist_rep_num"))
+                x.desc = find_class_text(s, "threadlist_abs", tag="div").strip()
+                # logging.log(4, "thread_title: %s", title)
+                # logging.log(4, "author: %s", s.find("span", **{"class": "tb_icon_author"}).text.strip())
+                # logging.log(4, "create_time: %s", s.find("span", **{"class": "is_show_create_time"}).text.strip())
+                # logging.log(4, "last_reply_time: %s", s.find("span", **{"class": "threadlist_reply_date"}).text.strip())
+                # print(x)
+                l.append(x)
+            except Exception as e:
+                if len(s.css(".icon-top")) != 0:
+                    logging.log(5, "tieba top_list_folder found")
+                elif len(s.css(".j_click_stats")) != 0:
+                    logging.log(5, "tieba j_click_stats found")
+                else:
+                    logging.warning("exception: %s", e)
+                    logging.warning("broken thread: %s", s)
+                continue
+
+        for x in l:
+            self.db.documents.update(
+                {'name': x.id},
+                {
+                    '$set': {
+                        'title': x.title,
+                        'author': x.author,
+                        'desc': x.desc,
+                        # 'catalog': x.catalog,
                     },
-                    upsert=True
-                )
-                db.head.insert_one({
-                    'name': x.id,
-                    'updatetime': x.last_reply_time,
-                    'reply': x.reply_num,
-                })
-            print([(x.id, x.reply_num) for x in l])
-        except http.client.HTTPException as e:
-            logging.warning("%s: %s", (type(e), e))
-        except socket.timeout as e:
-            logging.warning("%s: %s", (type(e), e))
-        except KeyboardInterrupt:
-            logging.warning("Ctrl+C pressed")
-            break
-        except Exception as e:
-            logging.error("Unexpected exception %s: %s", (type(e), e))
-            break
-        finally:
-            conn.close()
-            logging.debug("sleep for %d seconds", sleeptime)
-            sleep(sleeptime)
-
-
-if __name__ == '__main__':
-    main()
+                    '$setOnInsert': {
+                        'name': x.id,
+                        'createtime': x.create_time,
+                    }
+                },
+                upsert=True
+            )
+            self.db.head.insert_one({
+                'name': x.id,
+                'updatetime': x.last_reply_time,
+                'reply': x.reply_num,
+            })
+        print([(x.id, x.reply_num) for x in l])
