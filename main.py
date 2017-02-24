@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import html2text
 import scrapy
 import logging
 import urllib.parse
@@ -34,37 +35,25 @@ def format_time(time, oldtime=None):
 ## {"id":4303087230,"author_name":"L\u5bfb\u5b88\u62a4\u661f","first_post_id":82410201113,"reply_num":275,"is_bakan":null,"vid":"","is_good":null,"is_top":null,"is_protal":null,"is_membertop":null}
 ## id, title, author_id, author_name, first_post_id, create_time, reply_num, last_reply_time, last_reply_author, desc, today_top_num, top_num
 ## reply_num_history (threshold)
-class ThreadItem:
-    def __init__(self, id, title, catalog='Unknown', author='', create_time='', last_reply_time='', reply_num=-1,
-                 desc=''):
-        self.id = id
-        self.title = title
-        self.catalog = catalog
-        self.author = author
-        self.create_time = create_time
-        self.last_reply_time = last_reply_time
-        self.reply_num = int(reply_num)
-        self.desc = desc
+class ThreadItem(scrapy.Item):
+    id = scrapy.Field()
+    title = scrapy.Field()
+    #catalog = scrapy.Field()
+    author = scrapy.Field()
+    create_time = scrapy.Field()
+    last_reply_time = scrapy.Field()
+    reply_num = scrapy.Field()
+    desc = scrapy.Field()
 
-    def __str__(self):
-        params = "url='%s', title='%s'" % (self.id, self.title)
-        if self.catalog:
-            params += ", catalog='%s'" % self.catalog
-        if self.author:
-            params += ", author='%s'" % self.author
-        if self.create_time:
-            params += ", create=%s" % self.create_time
-        if self.last_reply_time:
-            params += ", last_reply=%s" % self.last_reply_time
-        if self.reply_num != -1:
-            params += ", reply=%d" % self.reply_num
-        if self.desc:
-            params += ", desc='%s'" % self.desc
-        return "ThreadItem(%s)" % params
 
-    def __repr__(self):
-        from pprint import pformat
-        return pformat(vars(self), indent=4, width=1)
+class ReplyItem(scrapy.Item):
+    id = scrapy.Field()
+    thread_id = scrapy.Field()
+    author = scrapy.Field()
+    author_level = scrapy.Field()
+    text = scrapy.Field()
+    reply_time = scrapy.Field()
+    reply_reply_num = scrapy.Field()
 
 
 def find_class_text(selector, classname, tag=''):
@@ -79,28 +68,36 @@ class TiebaSpider(scrapy.Spider):
     name = "tieba"
 
     db = MongoClient('localhost', 3269).test
+    ht = html2text.HTML2Text()
 
-    def start_requests(self):
-        yield scrapy.Request("http://" + hostname + '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}))
+    custom_settings = {
+        'DOWNLOAD_DELAY': 0.25,
+    }
+
+    start_urls = ["http://" + hostname + '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}), ]
 
     def parse(self, response):
         thread_list = response.xpath('//*[@id="thread_list"]/li')
         l = []
         for s in thread_list:
             try:
+                item = ThreadItem()
                 attrs = s.css('a.j_th_tit')
-                x = ThreadItem(get_attr_value(attrs, 'href'), get_attr_value(attrs, 'title'))
-                x.author = find_class_text(s, "tb_icon_author", tag="span")
-                x.create_time = format_time(find_class_text(s, "is_show_create_time"))
-                x.last_reply_time = format_time(find_class_text(s, "threadlist_reply_date"))
-                x.reply_num = int(find_class_text(s, "threadlist_rep_num"))
-                x.desc = find_class_text(s, "threadlist_abs", tag="div").strip()
+                item['id'] = get_attr_value(attrs, 'href')
+                item['title'] = get_attr_value(attrs, 'title')
+                item['author'] = find_class_text(s, "tb_icon_author", tag="span")
+                item['create_time'] = format_time(find_class_text(s, "is_show_create_time"))
+                item['last_reply_time'] = format_time(find_class_text(s, "threadlist_reply_date"))
+                item['reply_num'] = int(find_class_text(s, "threadlist_rep_num"))
+                item['desc'] = find_class_text(s, "threadlist_abs", tag="div").strip()
                 # logging.log(4, "thread_title: %s", title)
                 # logging.log(4, "author: %s", s.find("span", **{"class": "tb_icon_author"}).text.strip())
                 # logging.log(4, "create_time: %s", s.find("span", **{"class": "is_show_create_time"}).text.strip())
                 # logging.log(4, "last_reply_time: %s", s.find("span", **{"class": "threadlist_reply_date"}).text.strip())
-                # print(x)
-                l.append(x)
+                print(dict(item))
+                yield scrapy.Request(urllib.parse.urljoin(response.url, item['id']), self.parse_thread)
+                yield item
+                l.append(item)
             except Exception as e:
                 if len(s.css(".icon-top")) != 0:
                     logging.log(5, "tieba top_list_folder found")
@@ -111,26 +108,20 @@ class TiebaSpider(scrapy.Spider):
                     logging.warning("broken thread: %s", s)
                 continue
 
-        for x in l:
-            self.db.documents.update(
-                {'name': x.id},
-                {
-                    '$set': {
-                        'title': x.title,
-                        'author': x.author,
-                        'desc': x.desc,
-                        # 'catalog': x.catalog,
-                    },
-                    '$setOnInsert': {
-                        'name': x.id,
-                        'createtime': x.create_time,
-                    }
-                },
-                upsert=True
-            )
-            self.db.head.insert_one({
-                'name': x.id,
-                'updatetime': x.last_reply_time,
-                'reply': x.reply_num,
-            })
-        print([(x.id, x.reply_num) for x in l])
+        print([(x['id'], x['reply_num']) for x in l])
+
+    def parse_thread(self, response):
+        for x in response.xpath('//*[@id="j_p_postlist"]/div'):
+            try:
+                item = ReplyItem()
+                item['thread_id'] = urllib.parse.urlsplit(response.url).path
+                item['id'] = x.css('div.p_reply').xpath('@data-field').re_first('"pid":(.*?),')
+                item['author'] = x.css('.d_name a::text').extract_first()
+                item['author_level'] = x.css('.d_badge_lv::text').extract_first()
+                item['text'] = self.ht.handle(x.css('div.d_post_content').extract_first()).strip('\n')
+                item['reply_time'] = x.css('.tail-info')[-1].xpath('text()').extract_first()
+                item['reply_reply_num'] = x.css('div.p_reply').xpath('@data-field').re_first('"total_num":(\d+)')
+                yield item
+            except Exception as e:
+                logging.warning("exception: %s", e)
+                continue
