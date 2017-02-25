@@ -67,10 +67,56 @@ def get_attr_value(selector, attr):
     return selector.xpath('@%s' % attr).extract_first()
 
 
+class MongoPipeline(object):
+    db = MongoClient('localhost', 3269).test
+
+    def process_item(self, item, spider):
+        if isinstance(item, ThreadItem):
+            self.db.documents.update(
+                {'name': item['id']},
+                {
+                    '$set': {
+                        'title': item['title'],
+                        'author': item['author'],
+                        'desc': item['desc'],
+                    },
+                    '$setOnInsert': {
+                        'name': item['id'],
+                        'createtime': item['create_time'],
+                    }
+                },
+                upsert=True
+            )
+            self.db.head.insert_one({
+                'name': item['id'],
+                'updatetime': item['last_reply_time'],
+                'reply': item['reply_num'],
+            })
+        elif isinstance(item, ReplyItem):
+            self.db.replies.update(
+                {'id': item['id']},
+                {
+                    '$set': {
+                        'thread_id': item['thread_id'],
+                        'author': item['author'],
+                        'reply_reply_num': item['reply_reply_num'],
+                    },
+                    '$setOnInsert': {
+                        'id': item['id'],
+                        'author_level': item['author_level'],
+                        'text': item['text'],
+                        'reply_time': item['reply_time'],
+                    }
+                },
+                upsert=True
+            )
+        else:
+            logging.warning("unknown item type %s" % type(item))
+        return item
+
+
 class TiebaSpider(scrapy.Spider):
     name = "tieba"
-
-    db = MongoClient('localhost', 3269).test
     ht = html2text.HTML2Text()
 
     custom_settings = {
@@ -78,12 +124,11 @@ class TiebaSpider(scrapy.Spider):
         'SCHEDULER_PRIORITY_QUEUE': "main.ForumQueue",
         'SCHEDULER_DISK_QUEUE': 'scrapy.squeues.PickleFifoDiskQueue',
         'SCHEDULER_MEMORY_QUEUE': 'scrapy.squeues.FifoMemoryQueue',
+        'ITEM_PIPELINES': {'main.MongoPipeline': 100},
     }
 
     def parse(self, response):
-        thread_list = response.xpath('//*[@id="thread_list"]/li')
-        l = []
-        for s in thread_list:
+        for s in response.xpath('//*[@id="thread_list"]/li'):
             try:
                 item = ThreadItem()
                 attrs = s.css('a.j_th_tit')
@@ -98,10 +143,9 @@ class TiebaSpider(scrapy.Spider):
                 # logging.log(4, "author: %s", s.find("span", **{"class": "tb_icon_author"}).text.strip())
                 # logging.log(4, "create_time: %s", s.find("span", **{"class": "is_show_create_time"}).text.strip())
                 # logging.log(4, "last_reply_time: %s", s.find("span", **{"class": "threadlist_reply_date"}).text.strip())
-                print(dict(item))
+                #print(dict(item))
                 yield scrapy.Request(urllib.parse.urljoin(response.url, item['id']), self.parse_thread)
                 yield item
-                l.append(item)
             except Exception as e:
                 if len(s.css(".icon-top")) != 0:
                     logging.log(5, "tieba top_list_folder found")
@@ -111,8 +155,6 @@ class TiebaSpider(scrapy.Spider):
                     logging.warning("exception: %s", e)
                     logging.warning("broken thread: %s", s)
                 continue
-
-        print([(x['id'], x['reply_num']) for x in l])
 
     def parse_thread(self, response):
         for x in response.xpath('//*[@id="j_p_postlist"]/div'):
@@ -133,7 +175,7 @@ class TiebaSpider(scrapy.Spider):
 
 class ForumQueue(queuelib.PriorityQueue):
     start_urls = [
-        (start_url, 10)
+        (start_url, 60)
     ]
 
     def __init__(self, qfactory, startprios=()):
