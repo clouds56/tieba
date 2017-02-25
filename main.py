@@ -2,11 +2,13 @@
 
 import html2text
 import scrapy
+import queuelib
 import logging
 import urllib.parse
 import dateutil.parser
 import pytz
 from pymongo import MongoClient
+from time import time
 
 logger_level = logging.DEBUG
 logger_formatter = "[%(asctime)s] %(levelname)s :: %(message)s"
@@ -21,6 +23,7 @@ headers = {
 }
 
 hostname = "tieba.baidu.com"
+start_url = "http://" + hostname + '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"})
 sleeptime = 60
 
 timezone = pytz.timezone("Asia/Shanghai")
@@ -72,9 +75,10 @@ class TiebaSpider(scrapy.Spider):
 
     custom_settings = {
         'DOWNLOAD_DELAY': 0.25,
+        'SCHEDULER_PRIORITY_QUEUE': "main.ForumQueue",
+        'SCHEDULER_DISK_QUEUE': 'scrapy.squeues.PickleFifoDiskQueue',
+        'SCHEDULER_MEMORY_QUEUE': 'scrapy.squeues.FifoMemoryQueue',
     }
-
-    start_urls = ["http://" + hostname + '/f?%s' % urllib.parse.urlencode({'kw': "双梦镇"}), ]
 
     def parse(self, response):
         thread_list = response.xpath('//*[@id="thread_list"]/li')
@@ -125,3 +129,33 @@ class TiebaSpider(scrapy.Spider):
             except Exception as e:
                 logging.warning("exception: %s", e)
                 continue
+
+
+class ForumQueue(queuelib.PriorityQueue):
+    start_urls = [
+        (start_url, 10)
+    ]
+
+    def __init__(self, qfactory, startprios=()):
+        super().__init__(qfactory, startprios=startprios)
+        self.lastseen = {}
+
+    def _should(self, url, delay):
+        return url not in self.lastseen or time() - self.lastseen[url] > delay
+
+    def pop(self):
+        for url, delay in self.start_urls:
+            if self._should(url, delay):
+                self.lastseen[url] = time()
+                return scrapy.Request(url, dont_filter=True)
+        return super().pop()
+
+    def __len__(self):
+        length = super().__len__()
+        for url, delay in self.start_urls:
+            if self._should(url, delay):
+                length += 1
+        if length == 0:
+            logging.warning("len of ForumQueue is 0, force 1")
+            return 1
+        return length
