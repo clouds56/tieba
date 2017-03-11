@@ -7,7 +7,6 @@ import logging
 import urllib.parse
 import dateutil.parser
 import pytz
-from pymongo import MongoClient
 from time import time
 
 logger_level = logging.DEBUG
@@ -67,52 +66,96 @@ def get_attr_value(selector, attr):
     return selector.xpath('@%s' % attr).extract_first()
 
 
-class MongoPipeline(object):
-    db = MongoClient('localhost', 3269).test
+class DbPipeline(object):
+    def process_thread_item(self, item):
+        pass
+
+    def process_reply_item(self, item):
+        pass
 
     def process_item(self, item, spider):
         if isinstance(item, ThreadItem):
-            self.db.documents.update(
-                {'name': item['id']},
-                {
-                    '$set': {
-                        'title': item['title'],
-                        'author': item['author'],
-                        'desc': item['desc'],
-                    },
-                    '$setOnInsert': {
-                        'name': item['id'],
-                        'createtime': item['create_time'],
-                    }
-                },
-                upsert=True
-            )
-            self.db.head.insert_one({
-                'name': item['id'],
-                'updatetime': item['last_reply_time'],
-                'reply': item['reply_num'],
-            })
+            self.process_thread_item(item)
         elif isinstance(item, ReplyItem):
-            self.db.replies.update(
-                {'id': item['id']},
-                {
-                    '$set': {
-                        'thread_id': item['thread_id'],
-                        'author': item['author'],
-                        'reply_reply_num': item['reply_reply_num'],
-                    },
-                    '$setOnInsert': {
-                        'id': item['id'],
-                        'author_level': item['author_level'],
-                        'text': item['text'],
-                        'reply_time': item['reply_time'],
-                    }
-                },
-                upsert=True
-            )
+            self.process_reply_item(item)
         else:
             logging.warning("unknown item type %s" % type(item))
         return item
+
+
+class MongoPipeline(DbPipeline):
+    from pymongo import MongoClient
+    # docker run --name some-postgres -P -e POSTGRES_PASSWORD=mysecretpassword -d postgres
+    db = MongoClient('localhost', 3269).test
+
+    def process_thread_item(self, item):
+        self.db.documents.update(
+            {'name': item['id']},
+            {
+                '$set': {
+                    'title': item['title'],
+                    'author': item['author'],
+                    'desc': item['desc'],
+                },
+                '$setOnInsert': {
+                    'name': item['id'],
+                    'createtime': item['create_time'],
+                }
+            },
+            upsert=True
+        )
+        self.db.head.insert_one({
+            'name': item['id'],
+            'updatetime': item['last_reply_time'],
+            'reply': item['reply_num'],
+        })
+
+    def process_reply_item(self, item):
+        self.db.replies.update(
+            {'id': item['id']},
+            {
+                '$set': {
+                    'thread_id': item['thread_id'],
+                    'author': item['author'],
+                    'reply_reply_num': item['reply_reply_num'],
+                },
+                '$setOnInsert': {
+                    'id': item['id'],
+                    'author_level': item['author_level'],
+                    'text': item['text'],
+                    'reply_time': item['reply_time'],
+                }
+            },
+            upsert=True
+        )
+
+
+class PostgresPipeline(DbPipeline):
+    import psycopg2
+    db = psycopg2.connect(database='tieba', user='postgres', host="localhost", port=32776, password='mysecretpassword')
+
+    def _run(self, format, values):
+        cur = self.db.cursor()
+        try:
+            cur.execute(format, values)
+            cur.close()
+            self.db.commit()
+        except:
+            self.db.rollback()
+            raise
+
+    def process_thread_item(self, item):
+        self._run("INSERT INTO documents (id, title, author, create_time, description) " +
+                  "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                  (item['id'], item['title'], item['author'], item['create_time'], item['desc']))
+        self._run("INSERT INTO head (thread_id, update_time, reply_num)" +
+                  "VALUES (%s, %s, %s)", (item['id'], item['last_reply_time'], item['reply_num']))
+
+    def process_reply_item(self, item):
+        self._run("INSERT INTO replies (reply_id, thread_id, author, author_level, body, reply_time, reply_reply_num) " +
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                  (item['id'], item['thread_id'], item['author'], item['author_level'], item['text'],
+                  item['reply_time'], item['reply_reply_num']))
 
 
 class TiebaSpider(scrapy.Spider):
@@ -124,7 +167,7 @@ class TiebaSpider(scrapy.Spider):
         'SCHEDULER_PRIORITY_QUEUE': "main.ForumQueue",
         'SCHEDULER_DISK_QUEUE': 'scrapy.squeues.PickleFifoDiskQueue',
         'SCHEDULER_MEMORY_QUEUE': 'scrapy.squeues.FifoMemoryQueue',
-        'ITEM_PIPELINES': {'main.MongoPipeline': 100},
+        'ITEM_PIPELINES': {'main.MongoPipeline': 100, 'main.PostgresPipeline': 100},
     }
 
     def parse(self, response):
@@ -132,7 +175,8 @@ class TiebaSpider(scrapy.Spider):
             try:
                 item = ThreadItem()
                 attrs = s.css('a.j_th_tit')
-                item['id'] = get_attr_value(attrs, 'href')
+                href = get_attr_value(attrs, 'href')
+                item['id'] = href.split('/')[-1]
                 item['title'] = get_attr_value(attrs, 'title')
                 item['author'] = find_class_text(s, "tb_icon_author", tag="span")
                 item['create_time'] = format_time(find_class_text(s, "is_show_create_time"))
@@ -144,7 +188,7 @@ class TiebaSpider(scrapy.Spider):
                 # logging.log(4, "create_time: %s", s.find("span", **{"class": "is_show_create_time"}).text.strip())
                 # logging.log(4, "last_reply_time: %s", s.find("span", **{"class": "threadlist_reply_date"}).text.strip())
                 #print(dict(item))
-                yield scrapy.Request(urllib.parse.urljoin(response.url, item['id']), self.parse_thread)
+                yield scrapy.Request(urllib.parse.urljoin(response.url, href), self.parse_thread)
                 yield item
             except Exception as e:
                 if len(s.css(".icon-top")) != 0:
@@ -160,7 +204,7 @@ class TiebaSpider(scrapy.Spider):
         for x in response.xpath('//*[@id="j_p_postlist"]/div'):
             try:
                 item = ReplyItem()
-                item['thread_id'] = urllib.parse.urlsplit(response.url).path
+                item['thread_id'] = urllib.parse.urlsplit(response.url).path.split('/')[-1]
                 item['id'] = x.css('div.p_reply').xpath('@data-field').re_first('"pid":(.*?),')
                 item['author'] = x.css('.d_name a::text').extract_first()
                 item['author_level'] = x.css('.d_badge_lv::text').extract_first()
